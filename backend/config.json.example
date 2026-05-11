@@ -1,0 +1,14 @@
+{
+  "check_interval": 60,
+  "response_timeout": 2,
+  "smtp": {
+    "host": "smtp.gmail.com",
+    "port": 587,
+    "use_tls": true,
+    "username": "ashis9903550174@gmail.com",
+    "password": "your-app-password",
+    "from_email": "ashis9903550174@gmail.com",
+    "to_email": "ashis9903550174@gmail.com"
+  },
+  "alert_cooldown_minutes": 5
+}
