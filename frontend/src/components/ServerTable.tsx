@@ -1,3 +1,10 @@
+interface Incident {
+  id: number;
+  started_at: string;
+  reason: string;
+  severity: string;
+}
+
 interface Server {
   id: number;
   name: string;
@@ -6,36 +13,47 @@ interface Server {
   last_status: string;
   last_check_time: string;
   uptime_24h: number;
+  last_response_time?: number | null;
+  last_error_category?: string | null;
+  last_severity?: string | null;
+  active_incident?: Incident | null;
 }
 
 interface ServerTableProps {
   servers: Server[];
   onDelete: (serverId: number) => void;
   onViewHistory: (server: Server) => void;
+  onViewStatus?: (server: Server) => void;
 }
 
-export default function ServerTable({ servers, onDelete, onViewHistory }: ServerTableProps) {
+export default function ServerTable({ servers, onDelete, onViewHistory, onViewStatus }: ServerTableProps) {
+
   const getStatusBadgeColor = (status: string) => {
-    if (status === 'UP') return 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/50';
-    if (status === 'DOWN') return 'bg-red-500/20 text-red-300 border border-red-400/50';
+    if (status === 'UP')      return 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/50';
+    if (status === 'DOWN')    return 'bg-red-500/20 text-red-300 border border-red-400/50';
     if (status === 'WARNING') return 'bg-amber-500/20 text-amber-300 border border-amber-400/50';
     return 'bg-slate-500/20 text-slate-300 border border-slate-400/50';
   };
 
   const getStatusDotColor = (status: string) => {
-    if (status === 'UP') return 'bg-emerald-400 shadow-lg shadow-emerald-400/50';
-    if (status === 'DOWN') return 'bg-red-400 shadow-lg shadow-red-400/50';
+    if (status === 'UP')      return 'bg-emerald-400 shadow-lg shadow-emerald-400/50';
+    if (status === 'DOWN')    return 'bg-red-400 shadow-lg shadow-red-400/50';
     if (status === 'WARNING') return 'bg-amber-400 shadow-lg shadow-amber-400/50';
     return 'bg-slate-400';
+  };
+
+  const getSeverityBadge = (severity: string | null | undefined) => {
+    if (!severity || severity === 'healthy') return null;
+    if (severity === 'critical') return 'bg-red-500/15 text-red-300 border border-red-500/30';
+    if (severity === 'warning')  return 'bg-amber-500/15 text-amber-300 border border-amber-500/30';
+    return null;
   };
 
   const formatTime = (timestamp: string | null) => {
     if (!timestamp) return 'Never';
     try {
       return new Date(timestamp + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    } catch {
-      return 'Invalid';
-    }
+    } catch { return 'Invalid'; }
   };
 
   if (servers.length === 0) {
@@ -55,81 +73,149 @@ export default function ServerTable({ servers, onDelete, onViewHistory }: Server
           <tr>
             <th className="px-6 py-4 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">Name</th>
             <th className="px-6 py-4 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">Status</th>
+            <th className="px-6 py-4 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">Issue</th>
             <th className="px-6 py-4 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">Response</th>
             <th className="px-6 py-4 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">Last Check</th>
             <th className="px-6 py-4 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">Uptime (24h)</th>
-            <th className="px-6 py-4 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">Email</th>
             <th className="px-6 py-4 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">Actions</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5">
-          {servers.map((server) => (
-            <tr key={server.id} className="hover:bg-white/5 transition-colors duration-200 border-white/5">
-              <td className="px-6 py-4">
-                <div>
-                  <p className="font-semibold text-white text-sm">{server.name}</p>
-                  <a
-                    href={server.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors truncate block mt-1"
-                  >
-                    {server.url}
-                  </a>
-                </div>
-              </td>
-              <td className="px-6 py-4">
-                <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold ${getStatusBadgeColor(server.last_status)}`}>
-                  <span className={`w-2 h-2 rounded-full ${getStatusDotColor(server.last_status)} animate-pulse`}></span>
-                  {server.last_status}
-                </span>
-              </td>
-              <td className="px-6 py-4 text-sm text-slate-400">
-                {server.uptime_24h !== null ? '-' : 'N/A'}
-              </td>
-              <td className="px-6 py-4 text-sm text-slate-400 font-mono">
-                {formatTime(server.last_check_time)}
-              </td>
-              <td className="px-6 py-4">
-                <div className="flex items-center gap-3">
-                  <div className="flex-1 w-24">
-                    <div className="w-full bg-slate-700 rounded-full h-2 overflow-hidden">
-                      <div
-                        className={`h-2 rounded-full transition-all duration-300 ${
-                          server.uptime_24h >= 99
-                            ? 'bg-gradient-to-r from-emerald-400 to-emerald-500 shadow-lg shadow-emerald-400/50'
-                            : server.uptime_24h >= 95
-                            ? 'bg-gradient-to-r from-amber-400 to-amber-500 shadow-lg shadow-amber-400/50'
-                            : 'bg-gradient-to-r from-red-400 to-red-500 shadow-lg shadow-red-400/50'
-                        }`}
-                        style={{ width: `${Math.min(server.uptime_24h, 100)}%` }}
-                      ></div>
+          {servers.map((server) => {
+            const severityBadge = getSeverityBadge(server.last_severity);
+            const hasIncident   = server.active_incident != null;
+
+            return (
+              <tr
+                key={server.id}
+                id={`server-row-${server.id}`}
+                className={`hover:bg-white/5 transition-colors duration-200 ${
+                  hasIncident ? 'bg-red-950/20' : ''
+                }`}
+              >
+                {/* Name */}
+                <td className="px-6 py-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <p className="font-semibold text-white text-sm">{server.name}</p>
+                      {hasIncident && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-bold bg-red-500/20 text-red-400 border border-red-500/30">
+                          <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+                          INCIDENT
+                        </span>
+                      )}
                     </div>
+                    <a href={server.url} target="_blank" rel="noreferrer"
+                      className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors truncate block mt-1 max-w-[180px]">
+                      {server.url}
+                    </a>
                   </div>
-                  <span className="text-sm font-bold text-white font-mono w-12 text-right">{server.uptime_24h.toFixed(1)}%</span>
-                </div>
-              </td>
-              <td className="px-6 py-4 text-sm text-slate-400">
-                {server.email}
-              </td>
-              <td className="px-6 py-4">
-                <div className="flex gap-2 items-center">
-                  <button
-                    onClick={() => onViewHistory(server)}
-                    className="px-3 py-2 text-xs font-semibold bg-cyan-500/20 text-cyan-300 border border-cyan-400/50 rounded-lg hover:bg-cyan-500/30 transition-all duration-200 hover:border-cyan-400 whitespace-nowrap"
-                  >
-                    History
-                  </button>
-                  <button
-                    onClick={() => onDelete(server.id)}
-                    className="px-3 py-2 text-xs font-semibold bg-red-500/20 text-red-300 border border-red-400/50 rounded-lg hover:bg-red-500/30 transition-all duration-200 hover:border-red-400"
-                  >
-                    Delete
-                  </button>
-                </div>
-              </td>
-            </tr>
-          ))}
+                </td>
+
+                {/* Status */}
+                <td className="px-6 py-4">
+                  <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold ${getStatusBadgeColor(server.last_status)}`}>
+                    <span className={`w-2 h-2 rounded-full ${getStatusDotColor(server.last_status)} animate-pulse`} />
+                    {server.last_status || 'PENDING'}
+                  </span>
+                </td>
+
+                {/* Issue (classified error) */}
+                <td className="px-6 py-4">
+                  {server.last_error_category && server.last_error_category !== 'Healthy' ? (
+                    <div>
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${
+                        severityBadge ?? 'bg-slate-500/15 text-slate-300 border border-slate-500/30'
+                      }`}>
+                        {server.last_error_category}
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="text-emerald-400/60 text-xs font-medium">Healthy</span>
+                  )}
+                </td>
+
+                {/* Response time */}
+                <td className="px-6 py-4 text-sm text-slate-400 font-mono">
+                  {server.last_response_time != null
+                    ? (
+                      <span className={
+                        server.last_response_time > 3 ? 'text-amber-400' :
+                        server.last_response_time > 1 ? 'text-yellow-400/80' :
+                        'text-slate-300'
+                      }>
+                        {server.last_response_time.toFixed(3)}s
+                      </span>
+                    )
+                    : <span className="text-slate-600">N/A</span>
+                  }
+                </td>
+
+                {/* Last check */}
+                <td className="px-6 py-4 text-sm text-slate-400 font-mono">
+                  {formatTime(server.last_check_time)}
+                </td>
+
+                {/* Uptime bar */}
+                <td className="px-6 py-4">
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 w-20">
+                      <div className="w-full bg-slate-700 rounded-full h-2 overflow-hidden">
+                        <div
+                          className={`h-2 rounded-full transition-all duration-500 ${
+                            server.uptime_24h >= 99
+                              ? 'bg-gradient-to-r from-emerald-400 to-emerald-500 shadow-lg shadow-emerald-400/50'
+                              : server.uptime_24h >= 95
+                              ? 'bg-gradient-to-r from-amber-400 to-amber-500 shadow-lg shadow-amber-400/50'
+                              : 'bg-gradient-to-r from-red-400 to-red-500 shadow-lg shadow-red-400/50'
+                          }`}
+                          style={{ width: `${Math.min(server.uptime_24h, 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                    <span className={`text-sm font-bold font-mono w-14 text-right ${
+                      server.uptime_24h >= 99 ? 'text-emerald-400' :
+                      server.uptime_24h >= 95 ? 'text-amber-400' : 'text-red-400'
+                    }`}>
+                      {server.uptime_24h.toFixed(1)}%
+                    </span>
+                  </div>
+                </td>
+
+                {/* Actions */}
+                <td className="px-6 py-4">
+                  <div className="flex gap-2 items-center flex-wrap">
+                    <button
+                      id={`btn-history-${server.id}`}
+                      onClick={() => onViewHistory(server)}
+                      className="px-3 py-1.5 text-xs font-semibold bg-cyan-500/20 text-cyan-300 border border-cyan-400/50
+                                 rounded-lg hover:bg-cyan-500/30 transition-all duration-200 hover:border-cyan-400 whitespace-nowrap"
+                    >
+                      History
+                    </button>
+                    {onViewStatus && (
+                      <button
+                        id={`btn-status-${server.id}`}
+                        onClick={() => onViewStatus(server)}
+                        className="px-3 py-1.5 text-xs font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-400/50
+                                   rounded-lg hover:bg-indigo-500/30 transition-all duration-200 hover:border-indigo-400 whitespace-nowrap"
+                      >
+                        Status
+                      </button>
+                    )}
+                    <button
+                      id={`btn-delete-${server.id}`}
+                      onClick={() => onDelete(server.id)}
+                      className="px-3 py-1.5 text-xs font-semibold bg-red-500/20 text-red-300 border border-red-400/50
+                                 rounded-lg hover:bg-red-500/30 transition-all duration-200 hover:border-red-400"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
