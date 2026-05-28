@@ -1,266 +1,149 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { ArrowLeft, CheckCircle2, AlertTriangle, XCircle, Clock, Activity } from 'lucide-react';
 import axios from 'axios';
 
-const API_URL = 'http://localhost:5000/api';
-
-interface PublicServer {
-  name: string;
-  url: string;
-  last_status: string;
-  last_check_time: string;
-}
-
-interface UptimeData {
-  '24h': number | null;
-  '7d':  number | null;
-  '30d': number | null;
-}
-
-interface Incident {
-  id: number;
-  started_at: string;
-  resolved_at: string | null;
-  duration_seconds: number | null;
-  reason: string;
-  error_category: string | null;
-  severity: string;
-  status: 'active' | 'resolved';
-}
-
-interface DayEntry {
-  day: string;
-  uptime: number | null;
-  checks: number;
-}
-
-interface StatusPageData {
-  server:            PublicServer;
-  uptime:            UptimeData;
-  active_incident:   Incident | null;
-  recent_incidents:  Incident[];
-  daily_grid:        DayEntry[];
-}
-
-function formatDuration(seconds: number | null): string {
-  if (!seconds) return 'Ongoing';
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  return m > 0 ? `${h}h ${m}m` : `${h}h`;
-}
-
-function formatTime(ts: string | null): string {
-  if (!ts) return '—';
-  try {
-    const iso = ts.includes('T') ? ts : ts.replace(' ', 'T') + (ts.endsWith('Z') ? '' : 'Z');
-    return new Date(iso).toLocaleString([], {
-      month: 'short', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', hour12: false,
-    });
-  } catch { return ts; }
-}
-
-function UptimeBar({ pct, label }: { pct: number | null; label: string }) {
-  const v = pct ?? 0;
-  const color = v >= 99 ? 'bg-emerald-500' : v >= 95 ? 'bg-amber-500' : 'bg-red-500';
-  const textColor = v >= 99 ? 'text-emerald-400' : v >= 95 ? 'text-amber-400' : 'text-red-400';
-  return (
-    <div className="flex items-center gap-3">
-      <span className="text-xs text-slate-400 w-8 shrink-0">{label}</span>
-      <div className="flex-1 bg-slate-800 rounded-full h-2 overflow-hidden">
-        <div
-          className={`${color} h-2 rounded-full transition-all duration-700`}
-          style={{ width: `${Math.min(v, 100)}%` }}
-        />
-      </div>
-      <span className={`text-xs font-bold font-mono w-14 text-right ${textColor}`}>
-        {pct !== null ? `${pct.toFixed(2)}%` : 'N/A'}
-      </span>
-    </div>
-  );
-}
-
-function DayCell({ entry }: { entry: DayEntry }) {
-  const pct = entry.uptime;
-  let color = 'bg-slate-800';
-  let title = 'No data';
-  if (pct !== null) {
-    color = pct >= 99 ? 'bg-emerald-500' : pct >= 95 ? 'bg-amber-500/70' : 'bg-red-500/70';
-    title = `${entry.day}: ${pct}% uptime (${entry.checks} checks)`;
-  }
-  return (
-    <div
-      title={title}
-      className={`w-3 h-3 rounded-sm ${color} cursor-default transition-opacity hover:opacity-70`}
-    />
-  );
-}
-
-interface Props {
+interface PublicStatusProps {
   slug: string;
   onBack: () => void;
 }
 
-export default function PublicStatusPage({ slug, onBack }: Props) {
-  const [data, setData]       = useState<StatusPageData | null>(null);
+interface PublicStatusData {
+  name: string;
+  status: string;
+  last_check_time: string;
+  uptime_30d: number | null;
+  active_incident: any | null;
+  latency_trend: { hour: string; avg_rt: number; checks: number }[];
+}
+
+export default function PublicStatusPage({ slug, onBack }: PublicStatusProps) {
+  const [data, setData] = useState<PublicStatusData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError]     = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setLoading(true);
-    axios.get(`${API_URL}/status/${slug}`)
-      .then(res => { setData(res.data); setLoading(false); })
-      .catch(() => { setError('Status page not found.'); setLoading(false); });
+    const fetchStatus = async () => {
+      try {
+        const res = await axios.get(`${import.meta.env.VITE_API_URL || 'http://localhost:5000/api'}/public/status/${slug}`);
+        setData(res.data);
+      } catch (err: any) {
+        setError(err.response?.data?.error || 'Failed to load status');
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchStatus();
+    // Refresh every 60s
+    const interval = setInterval(fetchStatus, 60000);
+    return () => clearInterval(interval);
   }, [slug]);
 
-  if (loading) return (
-    <div className="fixed inset-0 z-50 bg-slate-950 flex items-center justify-center">
-      <div className="text-center">
-        <div className="inline-block w-10 h-10 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin mb-4" />
-        <p className="text-slate-400">Loading status page...</p>
+  if (loading) {
+    return (
+      <div className="fixed inset-0 z-50 bg-slate-950 flex flex-col items-center justify-center">
+        <div className="w-8 h-8 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin mb-4" />
+        <p className="text-slate-400 font-medium">Loading status...</p>
       </div>
-    </div>
-  );
+    );
+  }
 
-  if (error || !data) return (
-    <div className="fixed inset-0 z-50 bg-slate-950 flex items-center justify-center">
-      <div className="text-center max-w-md px-6">
-        <div className="text-5xl mb-6">🔍</div>
-        <h2 className="text-2xl font-bold text-white mb-3">Status Page Not Found</h2>
-        <p className="text-slate-400 mb-6">{error ?? 'This status page does not exist.'}</p>
-        <button onClick={onBack}
-          className="px-5 py-2.5 bg-cyan-500 hover:bg-cyan-400 text-white rounded-lg font-semibold text-sm transition-colors">
-          ← Back to Dashboard
+  if (error || !data) {
+    return (
+      <div className="fixed inset-0 z-50 bg-slate-950 flex flex-col items-center justify-center p-6 text-center">
+        <AlertTriangle className="w-16 h-16 text-slate-600 mb-4" />
+        <h1 className="text-2xl font-bold text-slate-200 mb-2">Status Page Not Found</h1>
+        <p className="text-slate-400 mb-8 max-w-md">{error || 'This public status page does not exist or is not set to public.'}</p>
+        <button onClick={onBack} className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors">
+          <ArrowLeft className="w-4 h-4" />
+          Return to Dashboard
         </button>
       </div>
-    </div>
-  );
+    );
+  }
 
-  const { server, uptime, active_incident, recent_incidents, daily_grid } = data;
-
-  const statusConfig = {
-    UP:      { label: 'Operational',      dot: 'bg-emerald-400', text: 'text-emerald-400', bg: 'from-emerald-950 to-emerald-900/30' },
-    DOWN:    { label: 'Service Outage',   dot: 'bg-red-500',     text: 'text-red-400',     bg: 'from-red-950 to-red-900/30' },
-    WARNING: { label: 'Degraded Service', dot: 'bg-amber-400',   text: 'text-amber-400',   bg: 'from-amber-950 to-amber-900/30' },
-  }[server.last_status] ?? { label: 'Unknown', dot: 'bg-slate-500', text: 'text-slate-400', bg: 'from-slate-950 to-slate-900' };
+  const isUp = data.status === 'UP';
+  const isWarn = data.status === 'WARNING';
+  
+  const statusColor = isUp ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : 
+                     isWarn ? 'text-amber-400 bg-amber-500/10 border-amber-500/20' : 
+                     'text-red-400 bg-red-500/10 border-red-500/20';
+                     
+  const StatusIcon = isUp ? CheckCircle2 : isWarn ? AlertTriangle : XCircle;
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950 overflow-y-auto">
-      <div className="max-w-2xl mx-auto py-10 px-4">
-
-        {/* Back button */}
-        <button onClick={onBack}
-          className="flex items-center gap-2 text-slate-400 hover:text-white text-sm font-medium mb-8 transition-colors">
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-          </svg>
-          Back to Dashboard
+      <div className="max-w-4xl mx-auto px-4 py-8 md:py-16">
+        <button onClick={onBack} className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors mb-12">
+          <ArrowLeft className="w-4 h-4" />
+          Back
         </button>
 
-        {/* Status hero */}
-        <div className={`bg-gradient-to-br ${statusConfig.bg} border border-white/10 rounded-2xl p-8 mb-6`}>
-          <div className="flex items-center gap-4 mb-6">
-            <div className={`w-4 h-4 rounded-full ${statusConfig.dot} shadow-lg animate-pulse`} />
-            <div>
-              <h1 className="text-2xl font-bold text-white">{server.name}</h1>
-              <a href={server.url} target="_blank" rel="noreferrer"
-                className="text-sm text-slate-400 hover:text-cyan-400 transition-colors font-mono">
-                {server.url}
-              </a>
-            </div>
-          </div>
-          <div className={`text-4xl font-extrabold ${statusConfig.text} mb-2`}>
-            {statusConfig.label}
-          </div>
-          <p className="text-slate-400 text-sm">
-            Last checked: {formatTime(server.last_check_time)}
+        <header className="text-center mb-16">
+          <h1 className="text-4xl md:text-5xl font-bold text-white mb-4 tracking-tight">{data.name}</h1>
+          <p className="text-slate-400 text-lg">System Status Report</p>
+        </header>
+
+        {/* Big Status Banner */}
+        <div className={`p-8 md:p-12 rounded-3xl border flex flex-col items-center justify-center text-center mb-12 transition-colors ${statusColor}`}>
+          <StatusIcon className="w-20 h-20 mb-6" />
+          <h2 className="text-4xl font-bold mb-2">
+            {isUp ? 'All Systems Operational' : isWarn ? 'Degraded Performance' : 'Major Outage'}
+          </h2>
+          <p className="opacity-80 text-lg">
+            Last checked: {new Date(data.last_check_time + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
           </p>
         </div>
 
-        {/* Active incident banner */}
-        {active_incident && (
-          <div className="bg-red-950/60 border border-red-500/30 rounded-xl p-5 mb-6 flex items-start gap-4">
-            <div className="text-2xl">🔴</div>
-            <div>
-              <p className="font-bold text-red-300 mb-1">Active Incident</p>
-              <p className="text-sm text-red-200">{active_incident.reason}</p>
-              <p className="text-xs text-red-400 mt-2 font-mono">
-                Started: {formatTime(active_incident.started_at)}
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* Uptime bars */}
-        <div className="bg-white/5 border border-white/10 rounded-xl p-5 mb-6 space-y-3">
-          <h2 className="text-sm font-bold text-white mb-3">Uptime History</h2>
-          <UptimeBar pct={uptime['24h']} label="24h" />
-          <UptimeBar pct={uptime['7d']}  label="7d"  />
-          <UptimeBar pct={uptime['30d']} label="30d" />
-        </div>
-
-        {/* 90-day grid */}
-        {daily_grid.length > 0 && (
-          <div className="bg-white/5 border border-white/10 rounded-xl p-5 mb-6">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-bold text-white">90-Day Uptime Grid</h2>
-              <div className="flex items-center gap-3 text-xs text-slate-400">
-                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-500 inline-block" /> Up</span>
-                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-amber-500/70 inline-block" /> Degraded</span>
-                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-500/70 inline-block" /> Down</span>
-                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-slate-800 inline-block" /> No data</span>
+        {/* Active Incident */}
+        {data.active_incident && (
+          <div className="bg-red-950/30 border border-red-500/30 rounded-2xl p-6 mb-12">
+            <div className="flex items-start gap-4">
+              <div className="p-2 bg-red-500/20 rounded-lg">
+                <AlertTriangle className="w-6 h-6 text-red-400" />
+              </div>
+              <div>
+                <h3 className="text-xl font-bold text-red-100 mb-2">Active Incident</h3>
+                <p className="text-red-200/80 mb-4">{data.active_incident.reason}</p>
+                <div className="text-sm text-red-300/60 font-mono">
+                  Started: {new Date(data.active_incident.started_at + 'Z').toLocaleString()}
+                </div>
               </div>
             </div>
-            <div className="flex flex-wrap gap-1">
-              {daily_grid.map((entry, i) => (
-                <DayCell key={i} entry={entry} />
-              ))}
-            </div>
           </div>
         )}
 
-        {/* Incident history */}
-        {recent_incidents.length > 0 && (
-          <div className="bg-white/5 border border-white/10 rounded-xl overflow-hidden mb-6">
-            <div className="px-5 py-4 border-b border-white/10 bg-white/5">
-              <h2 className="text-sm font-bold text-white">Recent Incidents</h2>
+        {/* Metrics Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12">
+          <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-8 flex items-center gap-6">
+            <div className="p-4 bg-emerald-500/10 rounded-2xl text-emerald-400">
+              <Activity className="w-8 h-8" />
             </div>
-            <div className="divide-y divide-white/5">
-              {recent_incidents.map(inc => (
-                <div key={inc.id} className="px-5 py-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className={`w-2 h-2 rounded-full ${inc.status === 'active' ? 'bg-red-500 animate-pulse' : 'bg-slate-500'}`} />
-                        <span className="text-sm font-semibold text-white">{inc.error_category ?? 'Incident'}</span>
-                        <span className={`text-xs px-1.5 py-0.5 rounded font-bold ${
-                          inc.severity === 'critical' ? 'bg-red-500/20 text-red-300' : 'bg-amber-500/20 text-amber-300'
-                        }`}>
-                          {inc.severity.toUpperCase()}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-400">{inc.reason}</p>
-                      <p className="text-xs text-slate-500 mt-1 font-mono">{formatTime(inc.started_at)}</p>
-                    </div>
-                    <div className="text-xs font-mono font-bold text-slate-300 shrink-0">
-                      {inc.status === 'active' ? (
-                        <span className="text-red-400">Ongoing</span>
-                      ) : formatDuration(inc.duration_seconds)}
-                    </div>
-                  </div>
-                </div>
-              ))}
+            <div>
+              <p className="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-1">30-Day Uptime</p>
+              <div className="text-4xl font-bold text-white">
+                {data.uptime_30d ? `${data.uptime_30d}%` : 'N/A'}
+              </div>
             </div>
           </div>
-        )}
-
-        {/* Footer */}
-        <div className="text-center">
-          <p className="text-xs text-slate-600">
-            Powered by <span className="text-slate-500 font-semibold">CheckMyServer</span> — Real-time Infrastructure Monitoring
-          </p>
+          
+          <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-8 flex items-center gap-6">
+            <div className="p-4 bg-blue-500/10 rounded-2xl text-blue-400">
+              <Clock className="w-8 h-8" />
+            </div>
+            <div>
+              <p className="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-1">Average Latency (24h)</p>
+              <div className="text-4xl font-bold text-white">
+                {data.latency_trend.length > 0 
+                  ? `${(data.latency_trend.reduce((acc, curr) => acc + curr.avg_rt, 0) / data.latency_trend.length).toFixed(2)}s` 
+                  : 'N/A'}
+              </div>
+            </div>
+          </div>
         </div>
+
+        <footer className="text-center text-slate-500 text-sm">
+          Powered by CheckMyServer
+        </footer>
       </div>
     </div>
   );

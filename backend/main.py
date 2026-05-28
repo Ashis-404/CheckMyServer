@@ -16,25 +16,43 @@ import alert_manager
 import incident_manager
 import warning_detector
 import logger as logger_module
+import maintenance_manager
+import notification_manager
+import ssl_manager
 
 
 CONFIG_FILE = "config.json"
 
 
+import os
+
 def load_config() -> dict:
-    """Load configuration from config.json"""
+    """Load configuration from config.json, with env var fallbacks/overrides"""
+    config = {
+        "check_interval": int(os.environ.get("CHECK_INTERVAL", 60)),
+        "alert_cooldown_minutes": int(os.environ.get("ALERT_COOLDOWN_MINUTES", 5)),
+        "api_port": int(os.environ.get("API_PORT", 5000)),
+        "email_sender": os.environ.get("EMAIL_SENDER", ""),
+        "email_password": os.environ.get("EMAIL_PASSWORD", ""),
+        "smtp_server": os.environ.get("SMTP_SERVER", ""),
+        "smtp_port": int(os.environ.get("SMTP_PORT", 587))
+    }
+    
     try:
         with open(CONFIG_FILE, 'r') as f:
-            config = json.load(f)
+            file_config = json.load(f)
+            # File config takes precedence unless env var was explicitly set
+            for k, v in file_config.items():
+                if k.upper() not in os.environ:
+                    config[k] = v
         print(f"✓ Config loaded: {CONFIG_FILE}")
-        return config
     except FileNotFoundError:
-        print(f"✗ Config file not found: {CONFIG_FILE}")
-        print(f"  Please copy {CONFIG_FILE}.example to {CONFIG_FILE} and configure it")
-        sys.exit(1)
+        print(f"ℹ️ Config file not found: {CONFIG_FILE}, using env vars / defaults")
     except json.JSONDecodeError as e:
         print(f"✗ Invalid JSON in {CONFIG_FILE}: {e}")
         sys.exit(1)
+        
+    return config
 
 
 async def publish_event_async(api_port: int, event_type: str, data: dict):
@@ -136,57 +154,90 @@ async def check_and_process_server(server: dict, config: dict, cooldown_minutes:
     }
     await publish_event_async(api_port, "server_update", updated_server)
 
-    # ── 7. Incident lifecycle management ────────────────────────────────────
+    # ── 7. Incident lifecycle & Maintenance management ─────────────────────────
+    active_maintenance = maintenance_manager.get_active_maintenance(server_id)
+
     if previous_stable != current_stable:
         print(f"  ⚡ Stable status change: {previous_stable} → {current_stable} for {server_name}")
 
-        # Pass URL to check_result for use in email templates
-        check_result["url"] = server_url
+        if active_maintenance:
+            print(f"  🛠️ Maintenance active for {server_name} — suppressing incidents and alerts.")
+            # We don't create incidents or send alerts, but we DO log a notification of state change
+            notification_manager.create_notification(
+                server_id, "Maintenance", 
+                f"{server_name} changed to {current_stable} during maintenance."
+            )
+            # Publish notification event
+            await publish_event_async(api_port, "notification", {"server_id": server_id})
+        else:
+            # Normal incident management
+            check_result["url"] = server_url
 
-        incident_event = incident_manager.handle_server_result(
-            server_id              = server_id,
-            server_name            = server_name,
-            check_result           = check_result,
-            current_stable_status  = current_stable,
-            previous_stable_status = previous_stable,
-        )
+            incident_event = incident_manager.handle_server_result(
+                server_id              = server_id,
+                server_name            = server_name,
+                check_result           = check_result,
+                current_stable_status  = current_stable,
+                previous_stable_status = previous_stable,
+            )
 
-        if incident_event:
-            # Broadcast incident event via SSE
-            await publish_event_async(api_port, incident_event["event_type"], incident_event)
+            if incident_event:
+                # Broadcast incident event via SSE
+                await publish_event_async(api_port, incident_event["event_type"], incident_event)
 
-            # ── Send alert emails ────────────────────────────────────────────
-            if not user_email:
-                print(f"  ⚠️ No email for {server_name} — skipping alert")
-            else:
-                if incident_event["event_type"] == "incident_created":
-                    # DOWN or WARNING alert
+                # ── Send alert emails ────────────────────────────────────────────
+                if not user_email:
+                    print(f"  ⚠️ No email for {server_name} — skipping alert")
+                else:
+                    if incident_event["event_type"] == "incident_created":
+                        # DOWN or WARNING alert
+                        alert_type = "DOWN" if current_stable == "DOWN" else "WARNING"
+                        
+                        notification_manager.create_notification(
+                            server_id, "Critical" if alert_type == "DOWN" else "Warning",
+                            f"Incident created: {server_name} is {alert_type}."
+                        )
+                        await publish_event_async(api_port, "notification", {"server_id": server_id})
+
+                        alert_manager.attempt_alert(
+                            config, server_id, server_name, user_email,
+                            alert_type, check_result, cooldown_minutes
+                        )
+
+                    elif incident_event["event_type"] == "incident_resolved":
+                        # Recovery alert with downtime info
+                        downtime = incident_event.get("downtime_duration", "Unknown")
+                        incident = incident_event.get("incident", {})
+                        reason   = incident.get("reason", "Service was unavailable")
+                        
+                        notification_manager.create_notification(
+                            server_id, "Recovery",
+                            f"{server_name} recovered after {downtime} seconds."
+                        )
+                        await publish_event_async(api_port, "notification", {"server_id": server_id})
+
+                        alert_manager.send_recovery_alert(
+                            config, server_id, server_name, user_email,
+                            check_result, downtime, reason
+                        )
+
+            # Handle simple state changes (non-incident but still transitions)
+            elif not incident_event and previous_stable != current_stable:
+                if current_stable in ("DOWN", "WARNING"):
                     alert_type = "DOWN" if current_stable == "DOWN" else "WARNING"
-                    alert_manager.attempt_alert(
-                        config, server_id, server_name, user_email,
-                        alert_type, check_result, cooldown_minutes
+                    
+                    notification_manager.create_notification(
+                        server_id, "Critical" if alert_type == "DOWN" else "Warning",
+                        f"{server_name} state changed to {alert_type}."
                     )
+                    await publish_event_async(api_port, "notification", {"server_id": server_id})
 
-                elif incident_event["event_type"] == "incident_resolved":
-                    # Recovery alert with downtime info
-                    downtime = incident_event.get("downtime_duration", "Unknown")
-                    incident = incident_event.get("incident", {})
-                    reason   = incident.get("reason", "Service was unavailable")
-                    alert_manager.send_recovery_alert(
-                        config, server_id, server_name, user_email,
-                        check_result, downtime, reason
-                    )
-
-        # Also handle non-incident alerts for simple state changes
-        # (e.g., if there was already an incident and this is a different transition)
-        elif not incident_event and previous_stable != current_stable:
-            if user_email and current_stable in ("DOWN", "WARNING"):
-                alert_type = "DOWN" if current_stable == "DOWN" else "WARNING"
-                check_result["url"] = server_url
-                alert_manager.attempt_alert(
-                    config, server_id, server_name, user_email,
-                    alert_type, check_result, cooldown_minutes
-                )
+                    if user_email:
+                        check_result["url"] = server_url
+                        alert_manager.attempt_alert(
+                            config, server_id, server_name, user_email,
+                            alert_type, check_result, cooldown_minutes
+                        )
 
 
 async def monitor_servers(config: dict, log):
@@ -203,6 +254,8 @@ async def monitor_servers(config: dict, log):
         iteration       = 0
         last_purge_time = 0
         purge_interval  = 86400  # 24 hours
+        last_ssl_time   = 0
+        ssl_interval    = 3600   # 1 hour
 
         while True:
             iteration += 1
@@ -212,6 +265,9 @@ async def monitor_servers(config: dict, log):
             if current_time - last_purge_time > purge_interval:
                 db.purge_old_records(days=30)
                 last_purge_time = current_time
+
+            # Update maintenance statuses (activate/complete based on schedule)
+            maintenance_manager.update_maintenance_statuses()
 
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print(f"\n[Check #{iteration}] {timestamp}")
@@ -227,6 +283,15 @@ async def monitor_servers(config: dict, log):
                     for server in db_servers
                 ]
                 await asyncio.gather(*tasks)
+
+                # Hourly SSL Checks
+                if current_time - last_ssl_time > ssl_interval:
+                    print("\n🔒 Running hourly SSL checks...")
+                    for server in db_servers:
+                        if server['url'].startswith('https'):
+                            # Run synchronously but they are fast enough
+                            ssl_manager.update_ssl_status(server['id'], server['url'])
+                    last_ssl_time = current_time
 
             # Print uptime summary
             print("\n📊 Uptime Summary:")

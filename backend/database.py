@@ -10,7 +10,9 @@ from datetime import datetime
 from typing import Optional, Tuple, List, Dict
 
 
-DB_FILE = "server_monitor.db"
+import os
+
+DB_FILE = os.environ.get("DB_PATH", "server_monitor.db")
 
 
 def init_db():
@@ -117,6 +119,47 @@ def init_db():
         )
     """)
 
+    # ── maintenance_windows table ────────────────────────────────────────────
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS maintenance_windows (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT,
+            target_server_ids TEXT NOT NULL,
+            start_time TIMESTAMP NOT NULL,
+            end_time TIMESTAMP NOT NULL,
+            status TEXT NOT NULL DEFAULT 'Scheduled'
+                CHECK(status IN ('Scheduled', 'Active', 'Completed'))
+        )
+    """)
+
+    # ── notifications table ──────────────────────────────────────────────────
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_id INTEGER,
+            severity TEXT NOT NULL CHECK(severity IN ('Info', 'Warning', 'Critical', 'Recovery', 'Maintenance', 'SSL')),
+            message TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_read INTEGER DEFAULT 0,
+            FOREIGN KEY (server_id) REFERENCES servers (id)
+        )
+    """)
+
+    # ── ssl_monitoring table ─────────────────────────────────────────────────
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ssl_monitoring (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_id INTEGER UNIQUE,
+            status TEXT NOT NULL,
+            days_remaining INTEGER,
+            expiry_date TIMESTAMP,
+            issuer TEXT,
+            last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (server_id) REFERENCES servers (id)
+        )
+    """)
+
     conn.commit()
 
     # ── Migrations: add new columns to existing tables ───────────────────────
@@ -139,12 +182,45 @@ def _migrate(conn, cursor):
         cursor.execute("ALTER TABLE monitoring_checks ADD COLUMN severity TEXT")
         print("Migrated: Added severity to monitoring_checks")
 
-    # servers: add email column (old migration, keep for safety)
+    # servers: add email, consecutive_failures, public_slug, and is_public columns
     cursor.execute("PRAGMA table_info(servers)")
     srv_cols = [col[1] for col in cursor.fetchall()]
     if "email" not in srv_cols:
         cursor.execute("ALTER TABLE servers ADD COLUMN email TEXT DEFAULT ''")
         print("Migrated: Added email to servers")
+    if "consecutive_failures" not in srv_cols:
+        cursor.execute("ALTER TABLE servers ADD COLUMN consecutive_failures INTEGER DEFAULT 0")
+        print("Migrated: Added consecutive_failures to servers")
+    if "public_slug" not in srv_cols:
+        cursor.execute("ALTER TABLE servers ADD COLUMN public_slug TEXT")
+        print("Migrated: Added public_slug to servers")
+    if "is_public" not in srv_cols:
+        cursor.execute("ALTER TABLE servers ADD COLUMN is_public INTEGER DEFAULT 0")
+        print("Migrated: Added is_public to servers")
+
+    # maintenance_windows: ensure table exists
+    cursor.execute("PRAGMA table_info(maintenance_windows)")
+    mw_cols = [col[1] for col in cursor.fetchall()]
+    if not mw_cols:
+        print("Migrated: maintenance_windows table created")
+
+    # notifications: ensure table exists
+    cursor.execute("PRAGMA table_info(notifications)")
+    notif_cols = [col[1] for col in cursor.fetchall()]
+    if not notif_cols:
+        print("Migrated: notifications table created")
+
+    # ssl_monitoring: ensure table exists
+    cursor.execute("PRAGMA table_info(ssl_monitoring)")
+    ssl_cols = [col[1] for col in cursor.fetchall()]
+    if not ssl_cols:
+        print("Migrated: ssl_monitoring table created")
+
+    # ssl_monitoring: ensure table exists
+    cursor.execute("PRAGMA table_info(ssl_monitoring)")
+    ssl_cols = [col[1] for col in cursor.fetchall()]
+    if not ssl_cols:
+        print("Migrated: ssl_monitoring table created")
 
     # performance_tests: ensure table exists (already created above for new DBs)
     cursor.execute("PRAGMA table_info(performance_tests)")

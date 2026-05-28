@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "8080:80"
+    restart: always
+
+  backend-api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: python backend/api.py
+    ports:
+      - "5000:5000"
+    volumes:
+      - data_volume:/app/data
+    environment:
+      - DB_PATH=/app/data/server_monitor.db
+    restart: always
+
+  backend-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: python backend/main.py
+    volumes:
+      - data_volume:/app/data
+    environment:
+      - DB_PATH=/app/data/server_monitor.db
+    restart: always
+
+volumes:
+  data_volume:

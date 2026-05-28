@@ -1,3 +1,9 @@
+interface SSLStatus {
+  status: string;
+  days_remaining: number | null;
+  issuer: string | null;
+}
+
 interface Incident {
   id: number;
   started_at: string;
@@ -17,6 +23,10 @@ interface Server {
   last_error_category?: string | null;
   last_severity?: string | null;
   active_incident?: Incident | null;
+  is_maintenance?: boolean;
+  ssl_status?: SSLStatus | null;
+  is_public?: number;
+  public_slug?: string;
 }
 
 interface ServerTableProps {
@@ -24,9 +34,10 @@ interface ServerTableProps {
   onDelete: (serverId: number) => void;
   onViewHistory: (server: Server) => void;
   onViewStatus?: (server: Server) => void;
+  onTogglePublic?: (server: Server) => void;
 }
 
-export default function ServerTable({ servers, onDelete, onViewHistory, onViewStatus }: ServerTableProps) {
+export default function ServerTable({ servers, onDelete, onViewHistory, onViewStatus, onTogglePublic }: ServerTableProps) {
 
   const getStatusBadgeColor = (status: string) => {
     if (status === 'UP')      return 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/50';
@@ -73,6 +84,7 @@ export default function ServerTable({ servers, onDelete, onViewHistory, onViewSt
           <tr>
             <th className="px-6 py-4 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">Name</th>
             <th className="px-6 py-4 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">Status</th>
+            <th className="px-6 py-4 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">SSL</th>
             <th className="px-6 py-4 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">Issue</th>
             <th className="px-6 py-4 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">Response</th>
             <th className="px-6 py-4 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">Last Check</th>
@@ -98,10 +110,15 @@ export default function ServerTable({ servers, onDelete, onViewHistory, onViewSt
                   <div>
                     <div className="flex items-center gap-2">
                       <p className="font-semibold text-white text-sm">{server.name}</p>
-                      {hasIncident && (
+                      {hasIncident && !server.is_maintenance && (
                         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-bold bg-red-500/20 text-red-400 border border-red-500/30">
                           <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
                           INCIDENT
+                        </span>
+                      )}
+                      {server.is_maintenance && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-bold bg-purple-500/20 text-purple-400 border border-purple-500/30">
+                          MAINTENANCE
                         </span>
                       )}
                     </div>
@@ -114,10 +131,39 @@ export default function ServerTable({ servers, onDelete, onViewHistory, onViewSt
 
                 {/* Status */}
                 <td className="px-6 py-4">
-                  <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold ${getStatusBadgeColor(server.last_status)}`}>
-                    <span className={`w-2 h-2 rounded-full ${getStatusDotColor(server.last_status)} animate-pulse`} />
-                    {server.last_status || 'PENDING'}
-                  </span>
+                  {server.is_maintenance ? (
+                    <span className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-purple-500/20 text-purple-300 border border-purple-400/50">
+                      <span className="w-2 h-2 rounded-full bg-purple-400 shadow-lg shadow-purple-400/50 animate-pulse" />
+                      MAINTENANCE
+                    </span>
+                  ) : (
+                    <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold ${getStatusBadgeColor(server.last_status)}`}>
+                      <span className={`w-2 h-2 rounded-full ${getStatusDotColor(server.last_status)} animate-pulse`} />
+                      {server.last_status || 'PENDING'}
+                    </span>
+                  )}
+                </td>
+
+                {/* SSL Status */}
+                <td className="px-6 py-4">
+                  {server.ssl_status ? (
+                    <div className="flex flex-col">
+                      <span className={`inline-flex w-fit items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                        server.ssl_status.status === 'Valid' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
+                        server.ssl_status.status === 'Expiring Soon' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
+                        'bg-red-500/20 text-red-400 border border-red-500/30'
+                      }`}>
+                        {server.ssl_status.status}
+                      </span>
+                      {server.ssl_status.days_remaining != null && (
+                        <span className="text-[10px] text-slate-500 mt-1 whitespace-nowrap">
+                          {server.ssl_status.days_remaining} days left
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-slate-600 text-xs">—</span>
+                  )}
                 </td>
 
                 {/* Issue (classified error) */}
@@ -193,14 +239,27 @@ export default function ServerTable({ servers, onDelete, onViewHistory, onViewSt
                     >
                       History
                     </button>
-                    {onViewStatus && (
+                    {onViewStatus && server.is_public === 1 && (
                       <button
                         id={`btn-status-${server.id}`}
                         onClick={() => onViewStatus(server)}
                         className="px-3 py-1.5 text-xs font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-400/50
                                    rounded-lg hover:bg-indigo-500/30 transition-all duration-200 hover:border-indigo-400 whitespace-nowrap"
                       >
-                        Status
+                        Public Page
+                      </button>
+                    )}
+                    {onTogglePublic && (
+                      <button
+                        id={`btn-toggle-public-${server.id}`}
+                        onClick={() => onTogglePublic(server)}
+                        className={`px-3 py-1.5 text-xs font-semibold border rounded-lg transition-all duration-200 whitespace-nowrap ${
+                          server.is_public === 1 
+                            ? 'bg-amber-500/20 text-amber-300 border-amber-400/50 hover:bg-amber-500/30 hover:border-amber-400' 
+                            : 'bg-slate-500/20 text-slate-300 border-slate-400/50 hover:bg-slate-500/30 hover:border-slate-400'
+                        }`}
+                      >
+                        {server.is_public === 1 ? 'Disable Public' : 'Enable Public'}
                       </button>
                     )}
                     <button

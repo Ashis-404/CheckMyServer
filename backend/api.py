@@ -15,6 +15,9 @@ import os
 import database as db
 import incident_manager
 import perf_manager
+import maintenance_manager
+import notification_manager
+import ssl_manager
 
 app = Flask(__name__)
 CORS(app)
@@ -110,7 +113,7 @@ def get_servers():
     try:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, name, url, email, created_at, last_check_time, last_status FROM servers"
+            "SELECT id, name, url, email, created_at, last_check_time, last_status, public_slug, is_public FROM servers"
         )
         servers = [dict(row) for row in cursor.fetchall()]
 
@@ -121,7 +124,7 @@ def get_servers():
 
             # Latest check details (response time + classified error)
             cursor.execute(
-                """SELECT response_time, error_message, error_category, severity, user_message
+                """SELECT response_time, error_message, error_category, severity
                    FROM monitoring_checks
                    WHERE server_id = ?
                    ORDER BY timestamp DESC LIMIT 1""",
@@ -140,6 +143,13 @@ def get_servers():
             # Active incident for this server
             active_incident = db.get_active_incident(server['id'])
             server['active_incident'] = active_incident
+
+            # Maintenance status
+            active_maint = maintenance_manager.get_active_maintenance(server['id'])
+            server['is_maintenance'] = active_maint is not None
+
+            # SSL status
+            server['ssl_status'] = ssl_manager.get_ssl_status(server['id'])
 
         return jsonify(servers)
     finally:
@@ -187,16 +197,38 @@ def add_server():
 
 @app.route('/api/servers/<int:server_id>', methods=['DELETE'])
 def delete_server(server_id):
-    """Delete a server"""
+    if db.delete_server(server_id):
+        return jsonify({"message": "Server deleted successfully"}), 200
+    return jsonify({"error": "Failed to delete server"}), 500
+
+@app.route('/api/servers/<int:server_id>/public', methods=['PUT'])
+def update_server_public_status(server_id):
+    """Update public status page settings for a server"""
+    data = request.get_json()
+    is_public = 1 if data.get('is_public') else 0
+    public_slug = data.get('public_slug')
+    
+    conn = db.get_connection()
+    if not conn:
+        return jsonify({"error": "DB connection failed"}), 500
     try:
-        server = db.get_server_by_id(server_id)
-        if not server:
-            return jsonify({"error": "Server not found"}), 404
-        if db.delete_server(server_id):
-            return jsonify({"message": "Server deleted successfully"}), 200
-        return jsonify({"error": "Failed to delete server"}), 500
+        cursor = conn.cursor()
+        if public_slug:
+            # ensure uniqueness
+            cursor.execute("SELECT id FROM servers WHERE public_slug = ? AND id != ?", (public_slug, server_id))
+            if cursor.fetchone():
+                return jsonify({"error": "Slug already in use"}), 400
+                
+        cursor.execute(
+            "UPDATE servers SET is_public = ?, public_slug = ? WHERE id = ?",
+            (is_public, public_slug, server_id)
+        )
+        conn.commit()
+        return jsonify({"message": "Updated successfully"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
 
 
 # ============================================================================
@@ -250,18 +282,10 @@ def get_server_metrics(server_id):
 # ============================================================================
 
 @app.route('/api/analytics/<int:server_id>', methods=['GET'])
-def get_server_analytics(server_id):
-    """Returns aggregated analytics for a server"""
-    try:
-        server = db.get_server_by_id(server_id)
-        if not server:
-            return jsonify({"error": "Server not found"}), 404
-
-        days = request.args.get('days', 7, type=int)
-        analytics = db.get_server_analytics(server_id, days=days)
-        return jsonify(analytics)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+def get_analytics(server_id):
+    days = request.args.get('days', 7, type=int)
+    analytics = db.get_server_analytics(server_id, days)
+    return jsonify(analytics)
 
 
 # ============================================================================
@@ -542,6 +566,107 @@ def delete_perf_test(test_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+# ============================================================================
+# MAINTENANCE & NOTIFICATIONS
+# ============================================================================
+
+@app.route('/api/maintenance', methods=['GET'])
+def get_maintenance():
+    try:
+        return jsonify(maintenance_manager.get_all_maintenance())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/maintenance', methods=['POST'])
+def schedule_maintenance():
+    try:
+        data = request.get_json()
+        title = data.get('title')
+        description = data.get('description', '')
+        target_server_ids = data.get('target_server_ids')
+        start_time = data.get('start_time')
+        end_time = data.get('end_time')
+        
+        if not title or not target_server_ids or not start_time or not end_time:
+            return jsonify({"error": "Missing required fields"}), 400
+            
+        m_id = maintenance_manager.schedule_maintenance(
+            title, description, target_server_ids, start_time, end_time
+        )
+        if m_id:
+            return jsonify({"message": "Maintenance scheduled", "id": m_id}), 201
+        return jsonify({"error": "Failed to schedule maintenance"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/maintenance/<int:m_id>', methods=['DELETE'])
+def delete_maintenance(m_id):
+    try:
+        if maintenance_manager.delete_maintenance(m_id):
+            return jsonify({"message": "Deleted"}), 200
+        return jsonify({"error": "Failed to delete"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/notifications', methods=['GET'])
+def get_notifications():
+    try:
+        limit = request.args.get('limit', 50, type=int)
+        return jsonify(notification_manager.get_notifications(limit))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/notifications/<int:n_id>/read', methods=['PUT'])
+def mark_notification_read(n_id):
+    try:
+        if notification_manager.mark_as_read(n_id):
+            return jsonify({"message": "Marked as read"}), 200
+        return jsonify({"error": "Failed to update"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/notifications/unread_count', methods=['GET'])
+def get_unread_count():
+    try:
+        return jsonify({"unread_count": notification_manager.get_unread_count()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================================
+# PUBLIC STATUS API
+# ============================================================================
+
+@app.route('/api/public/status/<slug>', methods=['GET'])
+def get_public_status_page(slug):
+    """Get sanitized public status for a server by its slug"""
+    conn = db.get_connection()
+    if not conn:
+        return jsonify({"error": "DB connection failed"}), 500
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, last_status, last_check_time FROM servers WHERE public_slug = ? AND is_public = 1", (slug,))
+        server = cursor.fetchone()
+        
+        if not server:
+            return jsonify({"error": "Not found or not public"}), 404
+            
+        server_id = server['id']
+        uptime_30d = db.calculate_uptime_percentage(server_id, days=30)
+        active_incident = db.get_active_incident(server_id)
+        
+        # Don't expose sensitive info like email or URL
+        return jsonify({
+            "name": server['name'],
+            "status": server['last_status'],
+            "last_check_time": server['last_check_time'],
+            "uptime_30d": uptime_30d,
+            "active_incident": active_incident,
+            "latency_trend": db.get_server_analytics(server_id, days=1).get("latency_trend", [])
+        })
+    finally:
+        conn.close()
 
 # ============================================================================
 # SSE — SERVER-SENT EVENTS

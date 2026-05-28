@@ -8,6 +8,8 @@ import IncidentTimeline from './components/IncidentTimeline';
 import AnalyticsDashboard from './components/AnalyticsDashboard';
 import PublicStatusPage from './components/PublicStatusPage';
 import PerformanceDashboard from './components/PerformanceDashboard';
+import { NotificationCenter } from './components/NotificationCenter';
+import { MaintenancePanel } from './components/MaintenancePanel';
 
 interface SystemStatus {
   status: string;
@@ -29,6 +31,9 @@ interface Server {
   last_error_category?: string | null;
   last_severity?: string | null;
   active_incident?: any | null;
+  is_maintenance?: boolean;
+  is_public?: number;
+  public_slug?: string;
 }
 
 interface ToastMsg {
@@ -60,9 +65,9 @@ interface Incident {
   status: 'active' | 'resolved';
 }
 
-type Tab = 'dashboard' | 'incidents' | 'analytics' | 'performance';
+type Tab = 'dashboard' | 'incidents' | 'analytics' | 'performance' | 'maintenance';
 
-const API_URL = 'http://localhost:5000/api';
+const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000/api');
 
 function App() {
   const [status,       setStatus]       = useState<SystemStatus | null>(null);
@@ -76,6 +81,7 @@ function App() {
   const [lastUpdated,  setLastUpdated]  = useState<Date>(new Date());
   const [statusSlug,   setStatusSlug]   = useState<string | null>(null);
   const [latestPerfTestId, setLatestPerfTestId] = useState<number | null>(null);
+  const [unreadNotifications, setUnreadNotifications] = useState(0);
 
   // Derived stats
   const totalCount   = servers.length;
@@ -94,14 +100,16 @@ function App() {
   const fetchData = async () => {
     try {
       setLoading(true);
-      const [statusRes, serversRes, incidentsRes] = await Promise.all([
+      const [statusRes, serversRes, incidentsRes, unreadRes] = await Promise.all([
         axios.get(`${API_URL}/status`),
         axios.get(`${API_URL}/servers`),
         axios.get(`${API_URL}/incidents`),
+        axios.get(`${API_URL}/notifications/unread_count`).catch(() => ({ data: { unread_count: 0 } }))
       ]);
       setStatus(statusRes.data);
       setServers(serversRes.data);
       setIncidents(incidentsRes.data);
+      if (unreadRes.data) setUnreadNotifications(unreadRes.data.unread_count);
       setLastUpdated(new Date());
     } catch {
       addToast('Failed to connect to the monitoring API.', 'error');
@@ -141,9 +149,24 @@ function App() {
     }
   };
 
+  const handleTogglePublic = async (server: Server) => {
+    try {
+      const isPublic = !server.is_public;
+      const slug = server.public_slug || server.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+      await axios.put(`${API_URL}/servers/${server.id}/public`, { is_public: isPublic, public_slug: slug });
+      addToast(`Public page ${isPublic ? 'enabled' : 'disabled'}`, 'success');
+      fetchData();
+    } catch (err: any) {
+      addToast(err.response?.data?.error || 'Failed to toggle public page', 'error');
+    }
+  };
+
   const handleViewStatus = (server: Server) => {
-    const slug = server.name.toLowerCase().replace(/\s+/g, '-').replace(/_/g, '-');
-    setStatusSlug(slug);
+    if (!server.is_public || !server.public_slug) {
+      addToast('This server does not have a public page enabled', 'error');
+      return;
+    }
+    setStatusSlug(server.public_slug);
   };
 
   useEffect(() => {
@@ -210,6 +233,13 @@ function App() {
           }
         }
 
+        else if (payload.type === 'notification') {
+          // Fetch the latest unread count from the server
+          axios.get(`${API_URL}/notifications/unread_count`)
+            .then(res => setUnreadNotifications(res.data.unread_count))
+            .catch(() => {});
+        }
+
       } catch (err) {
         console.error('SSE parse error:', err);
       }
@@ -239,7 +269,8 @@ function App() {
   const TABS: { id: Tab; label: string; badge?: number }[] = [
     { id: 'dashboard',   label: 'Dashboard' },
     { id: 'incidents',   label: 'Incidents', badge: activeIncidentCount > 0 ? activeIncidentCount : undefined },
-    { id: 'analytics',  label: 'Analytics' },
+    { id: 'maintenance', label: 'Maintenance' },
+    { id: 'analytics',   label: 'Analytics' },
     { id: 'performance', label: 'Performance ⚡' },
   ];
 
@@ -262,13 +293,23 @@ function App() {
                 </svg>
               </div>
               <div>
-                <h1 className="text-4xl font-bold text-white tracking-tight">Statify</h1>
+                <h1 className="text-4xl font-bold text-white tracking-tight">CheckMyServer</h1>
                 <p className="text-slate-400 mt-0.5 text-sm font-medium">Real-time infrastructure observability platform</p>
               </div>
             </div>
-            <div className="text-right bg-white/5 backdrop-blur-sm border border-white/10 rounded-xl p-4">
-              <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Live · Last Updated</div>
-              <div className="text-2xl font-bold mt-1 font-mono text-white">{lastUpdated.toLocaleTimeString()}</div>
+            <div className="flex items-center gap-4">
+              <NotificationCenter 
+                unreadCount={unreadNotifications} 
+                refreshCount={() => {
+                  axios.get(`${API_URL}/notifications/unread_count`)
+                    .then(res => setUnreadNotifications(res.data.unread_count))
+                    .catch(() => {});
+                }} 
+              />
+              <div className="text-right bg-white/5 backdrop-blur-sm border border-white/10 rounded-xl p-4">
+                <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Live · Last Updated</div>
+                <div className="text-2xl font-bold mt-1 font-mono text-white">{lastUpdated.toLocaleTimeString()}</div>
+              </div>
             </div>
           </div>
         </header>
@@ -376,6 +417,7 @@ function App() {
                 onDelete={handleDeleteServer}
                 onViewHistory={handleViewHistory}
                 onViewStatus={handleViewStatus}
+                onTogglePublic={handleTogglePublic}
               />
             </div>
           </div>
@@ -394,6 +436,10 @@ function App() {
             servers={servers}
             latestCompletedTestId={latestPerfTestId}
           />
+        )}
+
+        {activeTab === 'maintenance' && (
+          <MaintenancePanel />
         )}
       </div>
 
