@@ -15,9 +15,18 @@ import os
 DB_FILE = os.environ.get("DB_PATH", "server_monitor.db")
 
 
+def get_db_connection():
+    """Establish a database connection safely optimized for concurrency."""
+    conn = sqlite3.connect(DB_FILE)
+    # PRAGMA journal_mode=WAL enables Write-Ahead Logging, which allows concurrent readers and writers
+    # and prevents the 'database is locked' OperationalError.
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+
 def init_db():
     """Initialize database schema and run migrations if needed"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     # ── servers table ────────────────────────────────────────────────────────
@@ -247,7 +256,7 @@ def _migrate(conn, cursor):
 def get_connection():
     """Get a SQLite connection with row_factory set"""
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db_connection()
         conn.row_factory = sqlite3.Row
         return conn
     except sqlite3.Error as e:

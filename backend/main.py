@@ -26,16 +26,17 @@ CONFIG_FILE = "config.json"
 
 import os
 
-def load_config() -> dict:
+def load_config(log) -> dict:
     """Load configuration from config.json, with env var fallbacks/overrides"""
     config = {
-        "check_interval": int(os.environ.get("CHECK_INTERVAL", 60)),
+        "check_interval": max(10, int(os.environ.get("MONITOR_INTERVAL", os.environ.get("CHECK_INTERVAL", 60)))),
         "alert_cooldown_minutes": int(os.environ.get("ALERT_COOLDOWN_MINUTES", 5)),
         "api_port": int(os.environ.get("API_PORT", 5000)),
         "email_sender": os.environ.get("EMAIL_SENDER", ""),
         "email_password": os.environ.get("EMAIL_PASSWORD", ""),
         "smtp_server": os.environ.get("SMTP_SERVER", ""),
-        "smtp_port": int(os.environ.get("SMTP_PORT", 587))
+        "smtp_port": int(os.environ.get("SMTP_PORT", 587)),
+        "max_concurrent_checks": int(os.environ.get("MAX_CONCURRENT_CHECKS", 10))
     }
     
     try:
@@ -45,11 +46,11 @@ def load_config() -> dict:
             for k, v in file_config.items():
                 if k.upper() not in os.environ:
                     config[k] = v
-        print(f"✓ Config loaded: {CONFIG_FILE}")
+        log.info(f"Config loaded: {CONFIG_FILE}")
     except FileNotFoundError:
-        print(f"ℹ️ Config file not found: {CONFIG_FILE}, using env vars / defaults")
+        log.info(f"Config file not found: {CONFIG_FILE}, using env vars / defaults")
     except json.JSONDecodeError as e:
-        print(f"✗ Invalid JSON in {CONFIG_FILE}: {e}")
+        log.error(f"Invalid JSON in {CONFIG_FILE}: {e}")
         sys.exit(1)
         
     return config
@@ -88,7 +89,7 @@ def compute_stable_status(history: list, default: str = "UP") -> str:
     return "UP"
 
 
-async def check_and_process_server(server: dict, config: dict, cooldown_minutes: int):
+async def check_and_process_server(server: dict, config: dict, cooldown_minutes: int, log):
     """Asynchronously checks a single server and manages state transitions / alerts"""
     server_id   = server["id"]
     server_name = server["name"]
@@ -113,8 +114,8 @@ async def check_and_process_server(server: dict, config: dict, cooldown_minutes:
     # ── 3. Run intelligent warning detector ─────────────────────────────────
     check_result = warning_detector.analyze_performance(server_id, check_result)
 
-    # Print enriched result to terminal
-    print(health_checker.format_health_check_result(check_result, server_name))
+    # Log enriched result
+    log.info(health_checker.format_health_check_result(check_result, server_name))
 
     # ── 4. Log check with enriched fields ───────────────────────────────────
     db.log_check(
@@ -158,10 +159,10 @@ async def check_and_process_server(server: dict, config: dict, cooldown_minutes:
     active_maintenance = maintenance_manager.get_active_maintenance(server_id)
 
     if previous_stable != current_stable:
-        print(f"  ⚡ Stable status change: {previous_stable} → {current_stable} for {server_name}")
+        log.info(f"  ⚡ Stable status change: {previous_stable} → {current_stable} for {server_name}")
 
         if active_maintenance:
-            print(f"  🛠️ Maintenance active for {server_name} — suppressing incidents and alerts.")
+            log.info(f"  🛠️ Maintenance active for {server_name} — suppressing incidents and alerts.")
             # We don't create incidents or send alerts, but we DO log a notification of state change
             notification_manager.create_notification(
                 server_id, "Maintenance", 
@@ -187,7 +188,7 @@ async def check_and_process_server(server: dict, config: dict, cooldown_minutes:
 
                 # ── Send alert emails ────────────────────────────────────────────
                 if not user_email:
-                    print(f"  ⚠️ No email for {server_name} — skipping alert")
+                    log.warning(f"  ⚠️ No email for {server_name} — skipping alert")
                 else:
                     if incident_event["event_type"] == "incident_created":
                         # DOWN or WARNING alert
@@ -246,9 +247,7 @@ async def monitor_servers(config: dict, log):
     cooldown_minutes  = config.get("alert_cooldown_minutes", 5)
     api_port          = config.get("api_port", 5000)
 
-    print(f"\n🚀 Starting monitoring (interval: {check_interval}s, cooldown: {cooldown_minutes}m)")
-    print("=" * 60)
-    print("Press Ctrl+C to stop\n")
+    log.info(f"🚀 Starting monitoring (interval: {check_interval}s, cooldown: {cooldown_minutes}m)")
 
     try:
         iteration       = 0
@@ -258,106 +257,104 @@ async def monitor_servers(config: dict, log):
         ssl_interval    = 3600   # 1 hour
 
         while True:
-            iteration += 1
-            current_time = time.time()
+            try:
+                iteration += 1
+                current_time = time.time()
 
-            # Daily cleanup of old monitoring records
-            if current_time - last_purge_time > purge_interval:
-                db.purge_old_records(days=30)
-                last_purge_time = current_time
+                # Daily cleanup of old monitoring records
+                if current_time - last_purge_time > purge_interval:
+                    db.purge_old_records(days=30)
+                    last_purge_time = current_time
 
-            # Update maintenance statuses (activate/complete based on schedule)
-            maintenance_manager.update_maintenance_statuses()
+                # Update maintenance statuses (activate/complete based on schedule)
+                maintenance_manager.update_maintenance_statuses()
 
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"\n[Check #{iteration}] {timestamp}")
-            print("-" * 60)
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                log.info(f"[Check #{iteration}] {timestamp}")
 
-            db_servers = db.get_all_servers()
+                db_servers = db.get_all_servers()
 
-            if not db_servers:
-                print("  ℹ️ No servers to monitor. Add servers via the dashboard.")
-            else:
-                tasks = [
-                    check_and_process_server(server, config, cooldown_minutes)
-                    for server in db_servers
-                ]
-                await asyncio.gather(*tasks)
-
-                # Hourly SSL Checks
-                if current_time - last_ssl_time > ssl_interval:
-                    print("\n🔒 Running hourly SSL checks...")
-                    for server in db_servers:
-                        if server['url'].startswith('https'):
-                            # Run synchronously but they are fast enough
-                            ssl_manager.update_ssl_status(server['id'], server['url'])
-                    last_ssl_time = current_time
-
-            # Print uptime summary
-            print("\n📊 Uptime Summary:")
-            for server in db_servers:
-                uptime = db.calculate_uptime_percentage(server["id"], days=1)
-                if uptime is not None:
-                    print(f"  {server['name']}: {uptime}% (24h)")
-
-            # Publish overall system status via SSE
-            if db_servers:
-                fresh      = db.get_all_servers()
-                total      = len(fresh)
-                down_cnt   = sum(1 for s in fresh if s['last_status'] == 'DOWN')
-                warn_cnt   = sum(1 for s in fresh if s['last_status'] == 'WARNING')
-                inc_summary = incident_manager.get_active_incidents_summary()
-
-                if total == 0:
-                    overall = "Unknown"
-                elif down_cnt == total:
-                    overall = "Major Outage"
-                elif down_cnt > 0:
-                    overall = "Partial Outage"
-                elif warn_cnt > 0:
-                    overall = "Degraded Performance"
+                if not db_servers:
+                    log.info("  ℹ️ No servers to monitor. Add servers via the dashboard.")
                 else:
-                    overall = "All Systems Operational"
+                    max_concurrent = config.get("max_concurrent_checks", 10)
+                    semaphore = asyncio.Semaphore(max_concurrent)
+                    
+                    async def bounded_check(srv):
+                        async with semaphore:
+                            await check_and_process_server(srv, config, cooldown_minutes, log)
+                            
+                    tasks = [bounded_check(server) for server in db_servers]
+                    await asyncio.gather(*tasks)
 
-                await publish_event_async(api_port, "status_update", {
-                    "status":          overall,
-                    "total_servers":   total,
-                    "down_servers":    down_cnt,
-                    "warning_servers": warn_cnt,
-                    "active_incidents": inc_summary["total_active"],
-                })
+                    # Hourly SSL Checks
+                    if current_time - last_ssl_time > ssl_interval:
+                        log.info("🔒 Running hourly SSL checks...")
+                        for server in db_servers:
+                            if server['url'].startswith('https'):
+                                # Run synchronously but they are fast enough
+                                ssl_manager.update_ssl_status(server['id'], server['url'])
+                        last_ssl_time = current_time
 
-            print(f"\n⏳ Next check in {check_interval}s...", end="", flush=True)
-            await asyncio.sleep(check_interval)
+                # Print uptime summary
+                log.info("📊 Uptime Summary:")
+                for server in db_servers:
+                    uptime = db.calculate_uptime_percentage(server["id"], days=1)
+                    if uptime is not None:
+                        log.info(f"  {server['name']}: {uptime}% (24h)")
+
+                # Publish overall system status via SSE
+                if db_servers:
+                    fresh      = db.get_all_servers()
+                    total      = len(fresh)
+                    down_cnt   = sum(1 for s in fresh if s['last_status'] == 'DOWN')
+                    warn_cnt   = sum(1 for s in fresh if s['last_status'] == 'WARNING')
+                    inc_summary = incident_manager.get_active_incidents_summary()
+
+                    if total == 0:
+                        overall = "Unknown"
+                    elif down_cnt == total:
+                        overall = "Major Outage"
+                    elif down_cnt > 0:
+                        overall = "Partial Outage"
+                    elif warn_cnt > 0:
+                        overall = "Degraded Performance"
+                    else:
+                        overall = "All Systems Operational"
+
+                    await publish_event_async(api_port, "status_update", {
+                            "status":          overall,
+                            "total_servers":   total,
+                            "down_servers":    down_cnt,
+                            "warning_servers": warn_cnt,
+                            "active_incidents": inc_summary["total_active"],
+                        })
+
+                    log.info(f"⏳ Next check in {check_interval}s...")
+            except Exception as e:
+                log.error(f"Error during monitoring cycle: {e}", exc_info=True)
+            finally:
+                await asyncio.sleep(check_interval)
 
     except asyncio.CancelledError:
         pass
     except KeyboardInterrupt:
-        print("\n\n" + "=" * 60)
-        print("🛑 Monitoring stopped by user")
-        print("=" * 60)
+        log.info("🛑 Monitoring stopped by user")
 
 
 def main():
     """Main entry point"""
-    print("\n" + "=" * 60)
-    print("🔍 CheckMyServer — Monitoring Engine")
-    print("=" * 60)
-
     log = logger_module.setup_logger()
-    log.info("System started")
+    log.info("System started: CheckMyServer Monitoring Engine")
 
-    config = load_config()
+    config = load_config(log)
     db.init_db()
 
     try:
         asyncio.run(monitor_servers(config, log))
     except KeyboardInterrupt:
-        print("\n\n" + "=" * 60)
-        print("🛑 Monitoring stopped by user")
-        print("=" * 60)
+        log.info("🛑 Monitoring stopped by user")
     except Exception as e:
-        print(f"\n✗ Unexpected error: {e}")
         log.error(f"Unexpected error: {e}")
         sys.exit(1)
     finally:

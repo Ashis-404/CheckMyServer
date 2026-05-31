@@ -16,5 +16,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend code
 COPY backend/ ./backend/
 
-# The CMD will be overridden in docker-compose.yml to run either the api or the worker
+# Copy the startup script
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
 ENV PYTHONPATH=/app/backend
+
+# Start both services
+CMD ["/app/start.sh"]
+

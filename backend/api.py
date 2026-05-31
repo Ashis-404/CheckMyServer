@@ -11,6 +11,7 @@ import threading
 from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 import sqlite3
+import logger as logger_module
 import os
 import database as db
 import incident_manager
@@ -21,6 +22,8 @@ import ssl_manager
 
 app = Flask(__name__)
 CORS(app)
+
+log = logger_module.setup_logger()
 
 # Load performance config limits at startup
 _perf_config: dict = {}
@@ -50,17 +53,22 @@ def is_valid_email(email: str) -> bool:
 
 def get_db_connection():
     try:
-        conn = sqlite3.connect(db.DB_FILE)
+        conn = db.get_db_connection()
         conn.row_factory = sqlite3.Row
         return conn
     except sqlite3.Error as e:
-        print(f"Flask DB connection error: {e}")
+        log.error(f"Flask DB connection error: {e}")
         return None
 
 
 # ============================================================================
-# STATUS & SERVERS
+# API ENDPOINTS
 # ============================================================================
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint for Docker/Cloud deployments"""
+    return jsonify({"status": "ok", "version": "1.0.0"}), 200
 
 @app.route('/api/status', methods=['GET'])
 def get_overall_status():
@@ -738,5 +746,5 @@ if __name__ == '__main__':
         port = 5000
 
     db.init_db()
-    print(f"🚀 CheckMyServer API on port {port}")
+    log.error(f"🚀 CheckMyServer API on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
